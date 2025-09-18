@@ -400,7 +400,12 @@ with col2:
 
 # Footer
 st.markdown(
-    """
-    <hr/>
-    <small>
-    Tips: Hvis opptak i nettlese
+"""
+<hr/>
+<small>
+Tips: Hvis opptak i nettleser ikke fungerer på din plattform, bruk fanen «Last opp lydfil».\
+Du kan også bytte til andre komponenter (f.eks. streamlit-audiorec) om ønskelig.
+</small>
+""",
+unsafe_allow_html=True,
+)
