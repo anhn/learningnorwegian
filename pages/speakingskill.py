@@ -328,22 +328,53 @@ with col1:
         with status_col2:
             level_bar = st.progress(0)
 
-        ctx = webrtc_streamer(
-            key="speech-recorder",
-            mode=WebRtcMode.SENDONLY,
-            audio_receiver_size=1024,
-            rtc_configuration=RTC_CONFIGURATION,
-            media_stream_constraints={"audio": True, "video": False},
-            audio_frame_callback=audio_level_callback,
-        )
+        using_callback = True
+        try:
+            ctx = webrtc_streamer(
+                key="speech-recorder",
+                mode=WebRtcMode.SENDONLY,
+                audio_receiver_size=1024,
+                rtc_configuration=RTC_CONFIGURATION,
+                media_stream_constraints={"audio": True, "video": False},
+                audio_frame_callback=audio_level_callback,
+            )
+        except TypeError:
+            # Older streamlit-webrtc without audio_frame_callback support
+            using_callback = False
+            ctx = webrtc_streamer(
+                key="speech-recorder",
+                mode=WebRtcMode.SENDONLY,
+                audio_receiver_size=1024,
+                rtc_configuration=RTC_CONFIGURATION,
+                media_stream_constraints={"audio": True, "video": False},
+            )
 
         if ctx and ctx.state.playing:
             rec_status.markdown("<span style='padding:4px 8px;border-radius:6px;background:#e8f5e9;'>🟢 Opptak: PÅ</span>", unsafe_allow_html=True)
             # Oppdater visuelle indikatorer i en lettvektsløkke
-            for _ in range(1800):  # ~180 sekunder (Streamlit reruns når UI endres)
-                rms = float(st.session_state.get("_rms", 0.0))
-                level_bar.progress(min(1.0, rms))
-                speaking = st.session_state.get("_speaking", False)
+            for _ in range(1800):  # ~180 sekunder
+                if using_callback:
+                    rms = float(st.session_state.get("_rms", 0.0))
+                else:
+                    # Fallback: hent rå audioframes fra receiver og beregn RMS
+                    rms = 0.0
+                    try:
+                        if hasattr(ctx, "audio_receiver") and ctx.audio_receiver:
+                            frames = ctx.audio_receiver.get_frames(timeout=0.2)
+                            for f in frames:
+                                pcm = f.to_ndarray()
+                                if pcm.ndim == 2:
+                                    pcm = pcm.mean(axis=1)
+                                if pcm.dtype == np.int16:
+                                    data = pcm.astype(np.float32) / 32768.0
+                                else:
+                                    data = pcm.astype(np.float32)
+                                rms = max(rms, float(np.sqrt(np.mean(np.square(data)))))
+                    except Exception:
+                        pass
+
+                level_bar.progress(min(1.0, rms * 3.0))
+                speaking = (rms * 3.0) > 0.08 if not using_callback else st.session_state.get("_speaking", False)
                 speak_status.markdown(
                     ("<span style='padding:4px 8px;border-radius:6px;background:#fff3cd;'>🗣️ Snakker…</span>" if speaking
                      else "<span style='padding:4px 8px;border-radius:6px;background:#e3f2fd;'>🤫 Stille</span>"),
