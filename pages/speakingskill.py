@@ -204,6 +204,24 @@ def generate_text(topic: str, user: str, level: str) -> str:
 # Real-time audio level callback for streamlit-webrtc
 
 def audio_level_callback(frame):
+    # Send to real-time buffer queue
+    try:
+        pcm = frame.to_ndarray()
+        if pcm.ndim == 2:
+            pcm = pcm.mean(axis=1)
+        if pcm.dtype == np.int16:
+            data = pcm.astype(np.float32) / 32768.0
+        else:
+            data = pcm.astype(np.float32)
+        st.session_state["_frame_q"].put_nowait(data)
+        rms = float(np.sqrt(np.mean(np.square(data))))
+        prev = st.session_state.get("_rms", 0.0)
+        smoothed = 0.8 * prev + 0.2 * rms
+        st.session_state["_rms"] = max(0.0, min(1.0, smoothed))
+        st.session_state["_speaking"] = st.session_state["_rms"] > 0.08
+    except Exception:
+        pass
+    return frame
     try:
         pcm = frame.to_ndarray()
         if pcm.ndim == 2:
@@ -331,9 +349,73 @@ def save_to_mongo(doc: dict) -> str | None:
         st.error(f"Lagring feilet: {e}")
         return None
 
+# ---------------------- Live Transcription Helpers ----------------------
+
+import queue, threading, wave
+
+if "_frame_q" not in st.session_state:
+    st.session_state["_frame_q"] = queue.Queue(maxsize=100)
+if "_run_transcriber" not in st.session_state:
+    st.session_state["_run_transcriber"] = False
+if "_live_text" not in st.session_state:
+    st.session_state["_live_text"] = ""
+if "_transcriber_thread" not in st.session_state:
+    st.session_state["_transcriber_thread"] = None
+
+
+def pcm_chunks_to_wav_bytes(pcm_f32_mono, samplerate=48000):
+    pcm_i16 = (np.clip(pcm_f32_mono, -1, 1) * 32767.0).astype(np.int16)
+    bio = io.BytesIO()
+    with wave.open(bio, "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(samplerate)
+        wf.writeframes(pcm_i16.tobytes())
+    bio.seek(0)
+    bio.name = "live.wav"
+    return bio
+
+
+def live_transcriber_loop(chunk_seconds=3, samplerate=48000):
+    q = st.session_state["_frame_q"]
+    buf = []
+    last_send = time.time()
+    while st.session_state.get("_run_transcriber", False):
+        try:
+            pcm = q.get(timeout=0.25)
+            buf.append(pcm)
+        except queue.Empty:
+            pass
+        if (time.time() - last_send) >= chunk_seconds and buf:
+            chunk = np.concatenate(buf)
+            buf.clear()
+            last_send = time.time()
+            if client:
+                wav_bytes = pcm_chunks_to_wav_bytes(chunk, samplerate)
+                try:
+                    tr = client.audio.transcriptions.create(
+                        model="whisper-1",
+                        file=wav_bytes,
+                        language="no",
+                        temperature=0.0,
+                    )
+                    text = (tr.text or "").strip()
+                    if text:
+                        prev = st.session_state.get("_live_text", "")
+                        st.session_state["_live_text"] = (prev + " " + text).strip()
+                except Exception:
+                    pass
+
 # ---------------------- UI ----------------------
 
 st.title("🇳🇴 LanguageBuddy — Les & Snakk (NO)")
+
+# Patch asyncio exception handler (Python 3.13 workaround)
+try:
+    loop = asyncio.get_event_loop()
+    loop.set_exception_handler(_ignore_asyncio_noise)
+except Exception:
+    pass
 st.caption("Generer tekst, les høyt, få transkripsjon og analyse — lagre fremdrift i MongoDB.")
 
 with st.sidebar:
