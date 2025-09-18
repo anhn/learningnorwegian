@@ -38,6 +38,7 @@ import datetime as dt
 from dataclasses import dataclass
 
 import numpy as np
+import asyncio
 
 import streamlit as st
 from streamlit_webrtc import webrtc_streamer, WebRtcMode, RTCConfiguration
@@ -63,6 +64,30 @@ st.set_page_config(page_title="LanguageBuddy — Norwegian Practice", page_icon=
 RTC_CONFIGURATION = RTCConfiguration({
     "iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]
 })
+
+# Best-effort: ignore noisy asyncio datagram transport errors from ICE teardown
+def _ignore_asyncio_noise(loop, context):
+    msg = context.get("message", "")
+    exc = context.get("exception")
+    text = f"{msg} {exc}" if exc else msg
+    noisy = (
+        "Fatal write error on datagram transport" in text
+        or "Transaction.__retry" in text
+        or "sendto" in text
+    )
+    if noisy:
+        return  # swallow known ICE teardown noise
+    # Fallback to default handler
+    try:
+        loop.default_exception_handler(context)
+    except Exception:
+        pass
+
+try:
+    asyncio.get_running_loop().set_exception_handler(_ignore_asyncio_noise)
+except RuntimeError:
+    # No running loop yet; Streamlit will create one later.
+    pass
 
 USERS = ["anh", "giang", "hannah"]
 CEFR_LEVELS = ["A1", "A2", "B1", "B2", "C1", "C2"]
@@ -320,6 +345,19 @@ with st.sidebar:
     final_topic = topic_custom.strip() if topic_custom.strip() else topic
 
     st.divider()
+    st.subheader("Tilkobling")
+    use_host_only = st.toggle(
+        "Bruk kun lokale ICE-kandidater (deaktiver STUN/TURN)",
+        value=True,
+        help="Kan hjelpe bak brannmurer eller i miljøer uten UDP. Skru av hvis du har TURN/STUN.",
+    )
+    if use_host_only:
+        active_rtc_conf = RTCConfiguration({"iceServers": []})
+        st.caption("Host-only: ingen STUN/TURN. Kan feile over internett, men stabilt lokalt.")
+    else:
+        active_rtc_conf = RTC_CONFIGURATION
+
+    st.divider()
     st.subheader("Tekst")
     if st.button("✍️ Generer ~5 min tekst", type="primary"):
         with st.spinner("Genererer tekst …"):
@@ -327,159 +365,3 @@ with st.sidebar:
             state.analysis = None
             state.transcript_text = ""
             state.record_id = str(uuid.uuid4())
-
-# Main columns
-col1, col2 = st.columns([1.1, 0.9])
-
-with col1:
-    st.subheader("Original tekst (les høyt)")
-    if state.original_text:
-        st.text_area("", state.original_text, height=350)
-    else:
-        st.info("Klikk ‘Generer ~5 min tekst’ i sidemenyen for å komme i gang.")
-
-    st.markdown("**Opptak** — velg ett av alternativene:")
-    tab_rec, tab_upload = st.tabs(["🎙️ Spill inn (WebRTC)", "📤 Last opp lydfil"])
-
-    with tab_rec:
-        st.write("Bruk mikrofonen din og snakk — måleren under viser lydnivå i sanntid.")
-        # Sanntidsstatus
-        status_col1, status_col2 = st.columns([1, 3])
-        with status_col1:
-            rec_status = st.empty()
-            speak_status = st.empty()
-        with status_col2:
-            level_bar = st.progress(0)
-
-        using_callback = True
-        try:
-            ctx = webrtc_streamer(
-                key="speech-recorder",
-                mode=WebRtcMode.SENDONLY,
-                audio_receiver_size=1024,
-                rtc_configuration=RTC_CONFIGURATION,
-                media_stream_constraints={"audio": True, "video": False},
-                audio_frame_callback=audio_level_callback,
-            )
-        except TypeError:
-            # Older streamlit-webrtc without audio_frame_callback support
-            using_callback = False
-            ctx = webrtc_streamer(
-                key="speech-recorder",
-                mode=WebRtcMode.SENDONLY,
-                audio_receiver_size=1024,
-                rtc_configuration=RTC_CONFIGURATION,
-                media_stream_constraints={"audio": True, "video": False},
-            )
-
-        if ctx and ctx.state.playing:
-            rec_status.markdown("<span style='padding:4px 8px;border-radius:6px;background:#e8f5e9;'>🟢 Opptak: PÅ</span>", unsafe_allow_html=True)
-            # Oppdater visuelle indikatorer i en lettvektsløkke
-            for _ in range(1800):  # ~180 sekunder
-                if using_callback:
-                    rms = float(st.session_state.get("_rms", 0.0))
-                else:
-                    # Fallback: hent rå audioframes fra receiver og beregn RMS
-                    rms = 0.0
-                    try:
-                        if hasattr(ctx, "audio_receiver") and ctx.audio_receiver:
-                            frames = ctx.audio_receiver.get_frames(timeout=0.2)
-                            for f in frames:
-                                pcm = f.to_ndarray()
-                                if pcm.ndim == 2:
-                                    pcm = pcm.mean(axis=1)
-                                if pcm.dtype == np.int16:
-                                    data = pcm.astype(np.float32) / 32768.0
-                                else:
-                                    data = pcm.astype(np.float32)
-                                rms = max(rms, float(np.sqrt(np.mean(np.square(data)))))
-                    except Exception:
-                        pass
-
-                level_bar.progress(int(min(1.0, rms * 3.0) * 100))
-                speaking = (rms * 3.0) > 0.08 if not using_callback else st.session_state.get("_speaking", False)
-                speak_status.markdown(
-                    ("<span style='padding:4px 8px;border-radius:6px;background:#fff3cd;'>🗣️ Snakker…</span>" if speaking
-                     else "<span style='padding:4px 8px;border-radius:6px;background:#e3f2fd;'>🤫 Stille</span>"),
-                    unsafe_allow_html=True,
-                )
-                time.sleep(0.1)
-        else:
-            rec_status.markdown("<span style='padding:4px 8px;border-radius:6px;background:#ffebee;'>🔴 Opptak: AV</span>", unsafe_allow_html=True)
-            speak_status.empty()
-            level_bar.progress(0)
-
-    with tab_upload:
-        uploaded = st.file_uploader("Velg .wav/.mp3/.m4a/.webm", type=["wav", "mp3", "m4a", "webm"]) 
-        if uploaded is not None:
-            state.audio_bytes = uploaded.read()
-            st.success(f"Lydfil lastet: {uploaded.name} ({len(state.audio_bytes)//1024} kB)")
-
-    st.divider()
-    if st.button("🧠 Analyse (transkriber & sammenlign)", disabled=not state.original_text):
-        if not state.audio_bytes:
-            st.warning("Ingen lyd funnet. Last opp en lydfil i fanen ‘Last opp lydfil’.")
-        else:
-            with st.spinner("Transkriberer …"):
-                transcript = transcribe_audio(state.audio_bytes, filename="speech_upload.wav")
-                state.transcript_text = transcript
-            with st.spinner("Analyserer …"):
-                state.analysis = analyze(state.original_text, state.transcript_text)
-
-with col2:
-    st.subheader("Transkripsjon")
-    if state.transcript_text:
-        st.text_area("", state.transcript_text, height=200)
-    else:
-        st.info("Transkripsjonen vises her etter analyse.")
-
-    st.subheader("Resultater")
-    if state.analysis:
-        m = state.analysis["metrics"]
-        st.metric("Score", f"{state.analysis['score']} / 100")
-        st.write(
-            f"WER: **{m['wer']:.3f}**, CER: **{m['cer']:.3f}** · Ord (original/transkribert): **{m['orig_words']} / {m['trans_words']}**"
-        )
-        with st.expander("Forskjeller (ordvis) – grønt = tillegg, rødt = slettet"):
-            st.markdown(state.analysis["diff_html"], unsafe_allow_html=True)
-
-        st.markdown("**Styrker**")
-        for s in state.analysis["strengths"]:
-            st.write("• ", s)
-        st.markdown("**Forbedringspunkter**")
-        for w in state.analysis["weaknesses"]:
-            st.write("• ", w)
-
-        st.divider()
-        if st.button("💾 Lagre til MongoDB", use_container_width=True):
-            doc = {
-                "_app": "languagebuddy",
-                "record_id": state.record_id or str(uuid.uuid4()),
-                "timestamp": dt.datetime.utcnow(),
-                "user": user,
-                "level": level,
-                "topic": final_topic,
-                "metrics": state.analysis["metrics"],
-                "score": state.analysis["score"],
-                "strengths": state.analysis["strengths"],
-                "weaknesses": state.analysis["weaknesses"],
-                "original_text": state.original_text,
-                "transcript_text": state.transcript_text,
-            }
-            _id = save_to_mongo(doc)
-            if _id:
-                st.success(f"Lagring vellykket (id: {_id}).")
-    else:
-        st.info("Kjør analyse for å se resultater.")
-
-# Footer
-st.markdown(
-    """
-    <hr/>
-    <small>
-    Tips: Hvis opptak i nettleser ikke fungerer på din plattform, bruk fanen «Last opp lydfil».\
-    Du kan også bytte til andre komponenter (f.eks. streamlit-audiorec) om ønskelig.
-    </small>
-    """,
-    unsafe_allow_html=True,
-)
