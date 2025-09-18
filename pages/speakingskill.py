@@ -37,6 +37,8 @@ import uuid
 import datetime as dt
 from dataclasses import dataclass
 
+import numpy as np
+
 import streamlit as st
 from streamlit_webrtc import webrtc_streamer, WebRtcMode, RTCConfiguration
 
@@ -173,6 +175,27 @@ def generate_text(topic: str, user: str, level: str) -> str:
         return ""
 
 # ---------------------- Audio Utils ----------------------
+
+# Real-time audio level callback for streamlit-webrtc
+
+def audio_level_callback(frame):
+    try:
+        pcm = frame.to_ndarray()
+        if pcm.ndim == 2:
+            pcm = pcm.mean(axis=1)
+        if pcm.dtype == np.int16:
+            data = pcm.astype(np.float32) / 32768.0
+        else:
+            data = pcm.astype(np.float32)
+        rms = float(np.sqrt(np.mean(np.square(data))))
+        prev = st.session_state.get("_rms", 0.0)
+        smoothed = 0.8 * prev + 0.2 * rms
+        st.session_state["_rms"] = max(0.0, min(1.0, smoothed))
+        st.session_state["_speaking"] = st.session_state["_rms"] > 0.08
+    except Exception:
+        pass
+    return frame
+
 
 def transcribe_audio(audio_bytes: bytes, filename: str = "speech.webm") -> str:
     if not client:
@@ -373,7 +396,7 @@ with col1:
                     except Exception:
                         pass
 
-                level_bar.progress(min(1.0, rms * 3.0))
+                level_bar.progress(int(min(1.0, rms * 3.0) * 100))
                 speaking = (rms * 3.0) > 0.08 if not using_callback else st.session_state.get("_speaking", False)
                 speak_status.markdown(
                     ("<span style='padding:4px 8px;border-radius:6px;background:#fff3cd;'>🗣️ Snakker…</span>" if speaking
