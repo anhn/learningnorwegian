@@ -319,21 +319,41 @@ with col1:
     tab_rec, tab_upload = st.tabs(["🎙️ Spill inn (WebRTC)", "📤 Last opp lydfil"])
 
     with tab_rec:
-        # We use WebRTC to capture microphone audio. The recorded audio is provided as a blob.
+        st.write("Bruk mikrofonen din og snakk — måleren under viser lydnivå i sanntid.")
+        # Sanntidsstatus
+        status_col1, status_col2 = st.columns([1, 3])
+        with status_col1:
+            rec_status = st.empty()
+            speak_status = st.empty()
+        with status_col2:
+            level_bar = st.progress(0)
+
         ctx = webrtc_streamer(
             key="speech-recorder",
             mode=WebRtcMode.SENDONLY,
             audio_receiver_size=1024,
             rtc_configuration=RTC_CONFIGURATION,
             media_stream_constraints={"audio": True, "video": False},
+            audio_frame_callback=audio_level_callback,
         )
-        rec_container = st.empty()
-        rec_bytes = None
+
         if ctx and ctx.state.playing:
-            st.write("Opptak pågår … bruk nettleserens kontroller for å stoppe.")
-            # streamlit-webrtc doesn't provide a built-in recorder download easily for audio-only.
-            # For simplicity, instruct users to use the upload tab if saving a file is required.
-        # NOTE: For production, consider a dedicated recorder component or custom JS for getting audio blob.
+            rec_status.markdown("<span style='padding:4px 8px;border-radius:6px;background:#e8f5e9;'>🟢 Opptak: PÅ</span>", unsafe_allow_html=True)
+            # Oppdater visuelle indikatorer i en lettvektsløkke
+            for _ in range(1800):  # ~180 sekunder (Streamlit reruns når UI endres)
+                rms = float(st.session_state.get("_rms", 0.0))
+                level_bar.progress(min(1.0, rms))
+                speaking = st.session_state.get("_speaking", False)
+                speak_status.markdown(
+                    ("<span style='padding:4px 8px;border-radius:6px;background:#fff3cd;'>🗣️ Snakker…</span>" if speaking
+                     else "<span style='padding:4px 8px;border-radius:6px;background:#e3f2fd;'>🤫 Stille</span>"),
+                    unsafe_allow_html=True,
+                )
+                time.sleep(0.1)
+        else:
+            rec_status.markdown("<span style='padding:4px 8px;border-radius:6px;background:#ffebee;'>🔴 Opptak: AV</span>", unsafe_allow_html=True)
+            speak_status.empty()
+            level_bar.progress(0)
 
     with tab_upload:
         uploaded = st.file_uploader("Velg .wav/.mp3/.m4a/.webm", type=["wav", "mp3", "m4a", "webm"]) 
@@ -400,12 +420,12 @@ with col2:
 
 # Footer
 st.markdown(
-"""
-<hr/>
-<small>
-Tips: Hvis opptak i nettleser ikke fungerer på din plattform, bruk fanen «Last opp lydfil».\
-Du kan også bytte til andre komponenter (f.eks. streamlit-audiorec) om ønskelig.
-</small>
-""",
-unsafe_allow_html=True,
+    """
+    <hr/>
+    <small>
+    Tips: Hvis opptak i nettleser ikke fungerer på din plattform, bruk fanen «Last opp lydfil».\
+    Du kan også bytte til andre komponenter (f.eks. streamlit-audiorec) om ønskelig.
+    </small>
+    """,
+    unsafe_allow_html=True,
 )
